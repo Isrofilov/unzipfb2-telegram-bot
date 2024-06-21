@@ -9,6 +9,7 @@ from lxml import etree
 
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ALLOWED_FILE_SIZE = 32 * 1024 * 1024  # 32 MB in bytes
+MAX_FILES_IN_ARCHIVE = 1  # Maximum number of files in archive
 
 def get_file_path(file_id):
     try:
@@ -48,12 +49,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     with tempfile.TemporaryDirectory() as extract_path:
         try:
             with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
+                if len(zip_ref.infolist()) > MAX_FILES_IN_ARCHIVE:
+                    await send_reply(update, context, f'The archive contains more than {MAX_FILES_IN_ARCHIVE} files, which is not allowed.')
+                    os.remove(tmp_path)
+                    return
+
+                total_uncompressed_size = sum(zinfo.file_size for zinfo in zip_ref.infolist())
+                if total_uncompressed_size > ALLOWED_FILE_SIZE:
+                    await send_reply(update, context, 'The total uncompressed size of the archive exceeds the allowed limit of 100 MB.')
+                    os.remove(tmp_path)
+                    return
+
                 zip_ref.extractall(extract_path)
         except zipfile.BadZipFile:
             await send_reply(update, context, 'The file is not a valid zip archive.')
             os.remove(tmp_path)
             return
 
+        fb2_found = False
         for root, _, files in os.walk(extract_path):
             for file in files:
                 if file.endswith('.fb2'):
@@ -76,9 +89,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                 document=InputFile(fb2_file),
                                 caption=caption
                             )
+                        fb2_found = True
                     else:
                         await send_reply(update, context, 'The extracted .fb2 file exceeds the allowed size of 32 MB.')
                     break
+            if fb2_found:
+                break
+
+        if not fb2_found:
+            await send_reply(update, context, 'No valid .fb2 file found in the archive.')
 
     os.remove(tmp_path)
 
