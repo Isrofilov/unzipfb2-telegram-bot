@@ -36,6 +36,7 @@ ALLOWED_FILE_SIZE = 32 * 1024 * 1024  # 32 MB in bytes
 REQUEST_TIMEOUT = 60  # Timeout for requests in seconds
 MAX_RETRY_ATTEMPTS = 3  # Maximum number of retry attempts for failed operations
 MAX_ZIP_RATIO = 100  # Maximum allowed ratio between unpacked size and compressed size
+VALID_MIME_TYPES = ['application/zip', 'application/x-zip-compressed', 'multipart/x-zip']
 
 class SecurityError(Exception):
     """Custom exception for security-related issues"""
@@ -98,6 +99,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file_id = document.file_id
     file_size = document.file_size
     file_name = document.file_name or "unknown"
+    mime_type = document.mime_type
     
     # Log the file processing
     user_info = f"@{update.effective_user.username}" if update.effective_user.username else f"ID:{update.effective_user.id}"
@@ -107,8 +109,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if file_size > ALLOWED_FILE_SIZE:
         await send_reply(update, context, 'The file exceeds the maximum allowed size of 32 MB.')
         return
+    
+    # MIME type check
+    if mime_type not in VALID_MIME_TYPES:
+        await send_reply(update, context, 'Unsupported file type. Please send a valid ZIP archive.')
+        return
 
-    # Проверка расширения файла
+    # Extension check
     if not file_name.lower().endswith('.zip'):
         await send_reply(update, context, 'Please send a file with .zip extension')
         return
