@@ -5,6 +5,8 @@ import requests
 import tempfile
 import zipfile
 import shutil
+import time
+from collections import defaultdict
 from typing import Optional, Dict, Any
 from telegram import Update, InputFile
 from telegram.ext import (
@@ -38,9 +40,59 @@ MAX_RETRY_ATTEMPTS = 3  # Maximum number of retry attempts for failed operations
 MAX_ZIP_RATIO = 100  # Maximum allowed ratio between unpacked size and compressed size
 VALID_MIME_TYPES = ['application/zip', 'application/x-zip-compressed', 'multipart/x-zip']
 
+# Add file processing limits
+RATE_LIMIT_PER_MINUTE = 5  # Maximum 5 files per minute
+RATE_LIMIT_WINDOW = 60  # Period in seconds (1 minute)
+# Dictionary for storing user requests: user_id -> [Timestamp list]
+user_requests = defaultdict(list)
+
 class SecurityError(Exception):
     """Custom exception for security-related issues"""
     pass
+
+# Add a function to check the user's request limit
+def check_rate_limit(user_id: int) -> bool:
+    """
+    Proves that the user's request limit is not exceeded.
+    Returns True if the limit is not exceeded (the file can be processed).
+    """
+    current_time = time.time()
+    
+    # We delete entries older than RATE_LIMIT_WINDOW
+    user_requests[user_id] = [
+        timestamp for timestamp in user_requests[user_id] 
+        if current_time - timestamp < RATE_LIMIT_WINDOW
+    ]
+    
+    # We check if the limit is exceeded
+    if len(user_requests[user_id]) >= RATE_LIMIT_PER_MINUTE:
+        return False
+    
+    # Add a new request
+    user_requests[user_id].append(current_time)
+    return True
+
+# Add the function to clean old records
+async def cleanup_old_requests():
+    """Periodically clears old request records"""
+    current_time = time.time()
+    users_to_remove = []
+    for user_id, timestamps in user_requests.items():
+        # We delete entries older than RATE_LIMIT_WINDOW
+        user_requests[user_id] = [
+            timestamp for timestamp in timestamps 
+            if current_time - timestamp < RATE_LIMIT_WINDOW
+        ]
+        
+        # If the user has no more queries, we mark it to delete
+        if not user_requests[user_id]:
+            users_to_remove.append(user_id)
+    
+    # We delete empty notes
+    for user_id in users_to_remove:
+        del user_requests[user_id]
+    
+    logger.debug(f"Cleaned up request history. Active users: {len(user_requests)}")
 
 async def get_file_path(file_id: str) -> Optional[str]:
     """Get the file path for a given file ID with retry logic"""
@@ -100,10 +152,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     file_size = document.file_size
     file_name = document.file_name or "unknown"
     mime_type = document.mime_type
+    user_id = update.effective_user.id
     
     # Log the file processing
     user_info = f"@{update.effective_user.username}" if update.effective_user.username else f"ID:{update.effective_user.id}"
     logger.info(f"Processing document {file_name} ({file_size} bytes) from user {user_info}")
+
+    # Checking the requests limit
+    if not check_rate_limit(user_id):
+        time_to_wait = int(RATE_LIMIT_WINDOW - (time.time() - user_requests[user_id][0])) + 1
+        await send_reply(
+            update, 
+            context, 
+            f'Too many requests. Please wait approximately {time_to_wait} seconds before sending another file.'
+        )
+        return
 
     # File size validation
     if file_size > ALLOWED_FILE_SIZE:
@@ -317,7 +380,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         'Welcome to the FB2 Unzip Bot! 🤖\n'
         'I can help you extract .fb2 files from zip archives. Just send me '
         'a zip file containing *one* FB2 file, and I will extract it for you.\n'
-        'I can process archives up to 32MB in size.'
+        'I can process archives up to 32MB in size.\n'
+        'Note: You can send up to 5 files per minute.'
     )
     await send_reply(update, context, welcome_message)
 
@@ -331,7 +395,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         '*Limitations:*\n'
         '• Maximum file size: 32MB\n'
         '• Archive must contain only one file\n'
-        '• Only .fb2 files are supported'
+        '• Only .fb2 files are supported\n'
+        '• Maximum 5 files per minute per user'
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -368,6 +433,14 @@ def main() -> None:
         
         # Add error handler
         application.add_error_handler(error_handler)
+
+        # Launch the background task for cleaning old requests
+        job_queue = application.job_queue
+        job_queue.run_repeating(
+            cleanup_old_requests,
+            interval=RATE_LIMIT_WINDOW,
+            first=0.1
+        )
 
         # Start the Bot
         logger.info("Starting bot...")
