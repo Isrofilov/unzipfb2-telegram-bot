@@ -25,6 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Configuration
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
@@ -186,10 +188,20 @@ async def process_archive(update: Update, context: ContextTypes.DEFAULT_TYPE, ar
             if not actual_files[0].filename.lower().endswith('.fb2'):
                 raise SecurityError('The file in the archive must have .fb2 extension. Other formats are not supported.')
             
-            # Check for path traversal attacks
-            if actual_files[0].filename.startswith('/') or '..' in actual_files[0].filename:
-                raise SecurityError('The archive contains potentially unsafe paths and cannot be processed.')
-            
+            # File name security check
+            inner_path = actual_files[0].filename
+
+            if '/' in inner_path or '\\' in inner_path:
+                raise SecurityError('The archive must contain a single file at the root level (no folders).')
+
+            # Disallow absolute paths, up-level navigation, and nested directories
+            if (
+                inner_path.startswith('/') or
+                '..' in inner_path or
+                os.path.normpath(inner_path) != os.path.basename(inner_path)
+            ):
+                raise SecurityError('The archive must contain a single file at the root (no folders).')
+                        
             # Check for zip bomb
             file_item = actual_files[0]
             if file_item.compress_size > 0 and file_item.file_size / file_item.compress_size > MAX_ZIP_RATIO:
@@ -200,7 +212,7 @@ async def process_archive(update: Update, context: ContextTypes.DEFAULT_TYPE, ar
                 raise SecurityError('Unpacked file size exceeds the allowed limit.')
             
             # Extract file
-            zip_ref.extractall(path=extract_path)
+            safe_extract(zip_ref, extract_path)
             
     except zipfile.BadZipFile:
         await status_message.edit_text('The file is not a valid zip archive.')
@@ -230,6 +242,13 @@ async def process_archive(update: Update, context: ContextTypes.DEFAULT_TYPE, ar
     except Exception as e:
         logger.error(f"Error processing FB2 file {fb2_path}: {e}", exc_info=True)
         await status_message.edit_text("Failed to process FB2 file. The file may be corrupted.")
+
+def safe_extract(zip_file, path):
+    for member in zip_file.infolist():
+        member_path = os.path.realpath(os.path.join(path, member.filename))
+        if not member_path.startswith(os.path.realpath(path)):
+            raise SecurityError("Potential Zip Slip attack detected.")
+    zip_file.extractall(path)
 
 async def extract_fb2_metadata(fb2_path: str) -> Dict[str, Any]:
     """Extract metadata from FB2 file"""
