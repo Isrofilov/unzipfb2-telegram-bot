@@ -73,7 +73,7 @@ def check_rate_limit(user_id: int) -> bool:
     return True
 
 # Add the function to clean old records
-async def cleanup_old_requests():
+async def cleanup_old_requests(_: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodically clears old request records"""
     current_time = time.time()
     users_to_remove = []
